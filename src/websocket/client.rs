@@ -1,23 +1,31 @@
 //! WebSocket client implementation.
 
+use disruptor::{
+    BusySpinWithSpinLoopHint, MultiProducer, ProcessorSettings, Producer, SingleConsumerBarrier,
+};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
+// use tracing_subscriber::field::debug;
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use tracing::{debug, error, info, warn};
 
 use crate::auth::{generate_ws_signature, get_timestamp};
 use crate::config::WsConfig;
 use crate::error::{BybitError, Result};
+// use crate::utils::BybitResponse;
+use crate::websocket::fast_models::BybitResponse;
 use crate::websocket::models::*;
 use crate::{MAINNET_WS_TRADE, TESTNET_WS_TRADE};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Callback = Arc<dyn Fn(WsMessage) + Send + Sync>;
+
+use simd_json::prelude::*;
 
 /// WebSocket client for Bybit streaming API.
 pub struct BybitWebSocket {
@@ -27,6 +35,7 @@ pub struct BybitWebSocket {
     tx: Option<mpsc::Sender<Message>>,
     is_connected: Arc<RwLock<bool>>,
     is_trade: bool,
+    producer: Option<MultiProducer<BybitResponse, SingleConsumerBarrier>>,
 }
 
 impl BybitWebSocket {
@@ -38,7 +47,8 @@ impl BybitWebSocket {
             callbacks: Arc::new(RwLock::new(HashMap::new())),
             tx: None,
             is_connected: Arc::new(RwLock::new(false)),
-            is_trade: false, 
+            is_trade: false,
+            producer: None,
         }
     }
 
@@ -51,19 +61,28 @@ impl BybitWebSocket {
             tx: None,
             is_connected: Arc::new(RwLock::new(false)),
             is_trade: url == MAINNET_WS_TRADE || url == TESTNET_WS_TRADE,
+            producer: None,
         }
+    }
+
+    pub fn set_disruptor_producer(
+        &mut self,
+        producer: MultiProducer<BybitResponse, SingleConsumerBarrier>,
+    ) {
+        self.producer = Some(producer);
+        debug!("producer set ",);
     }
 
     /// Connect to the WebSocket server.
     pub async fn connect(&mut self) -> Result<()> {
         let url = &self.config.url;
-        info!(url = %url, "Connecting to WebSocket");
+        info!("Connecting to WebSocket:  {}", url);
 
         let (ws_stream, _) = connect_async(url)
             .await
             .map_err(|e| BybitError::WebSocket(Box::new(e)))?;
 
-        let (write, read) = ws_stream.split();
+        let (write, mut read) = ws_stream.split();
 
         // Create channel for sending messages
         let (tx, mut rx) = mpsc::channel::<Message>(100);
@@ -106,6 +125,7 @@ impl BybitWebSocket {
             }
         });
 
+        // let mut read_clone = read.clone();
         // Spawn read task
         let callbacks = self.callbacks.clone();
         let is_connected = self.is_connected.clone();
@@ -113,20 +133,52 @@ impl BybitWebSocket {
         let config = self.config.clone();
         let tx_reconnect = tx.clone();
 
+        // tokio::spawn(async move {
+        //     Self::handle_messages(
+        //         read,
+        //         callbacks,
+        //         is_connected,
+        //         subscriptions,
+        //         config,
+        //         tx_reconnect,
+        //     )
+        //     .await;
+        // });
+        // let dis = disruptor::build_multi_producer(64, || BybitResponse::Empty(), BusySpinWithSpinLoopHint)
+        //     .pin_at_core(1)
+        //     .handle_events_with(|_,_,_| {})
+        //     .build();
+
+        let producer_clone = self.producer.clone().unwrap();
+
         tokio::spawn(async move {
-            Self::handle_messages(
-                read,
-                callbacks,
-                is_connected,
-                subscriptions,
-                config,
-                tx_reconnect,
-            )
-            .await;
+            Self::faster_handle(read, producer_clone).await;
         });
 
         info!("WebSocket connected");
         Ok(())
+    }
+
+    async fn faster_handle(
+        mut read: futures_util::stream::SplitStream<WsStream>,
+        mut producer: MultiProducer<BybitResponse, SingleConsumerBarrier>,
+    ) {
+        while let Some(msg) = read.next().await {
+            let Ok(Message::Text(text)) = msg else { continue };
+
+            // let mut bytes = text.into_bytes();
+            match serde_json::from_str::<BybitResponse>(&text) {
+                Ok(response) => {
+                    producer.publish(|e| {
+                        *e = response;
+                    });
+                }
+                _ => {
+                    debug!("fuck")
+                }
+            }
+            
+        }
     }
 
     /// Handle incoming messages.
@@ -247,7 +299,7 @@ impl BybitWebSocket {
         let expires = get_timestamp() + 10000;
         let signature = generate_ws_signature(api_secret, expires);
 
-        let auth_msg= if self.is_trade {
+        let auth_msg = if self.is_trade {
             AuthRequest::Trade(WsTradeAuthRequest {
                 req_id: uuid::Uuid::new_v4().to_string(),
                 op: "auth".to_string(),
@@ -313,48 +365,48 @@ impl BybitWebSocket {
     }
 
     pub async fn subscribe_mut<F>(&mut self, topics: Vec<String>, callback: F) -> Result<()>
-where
-    F: FnMut(WsMessage) + Send + Sync + 'static,
-{
-    // 1. Wrap the FnMut in a Mutex to "convert" it to an Fn closure
-    let callback_mutable = Mutex::new(callback);
-
-    // 2. Create an Fn closure that locks the mutex and calls the inner FnMut
-    let wrapped_callback = move |msg: WsMessage| {
-        let mut cb = callback_mutable.lock();
-        (&mut *cb)(msg);
-    };
-
-    // 3. Wrap in Arc and cast to your existing Callback type
-    let callback_arc = Arc::new(wrapped_callback) as Callback;
-
-    // --- The rest of the logic remains the same as your original function ---
-
-    // Register callbacks
+    where
+        F: FnMut(WsMessage) + Send + Sync + 'static,
     {
-        let mut cbs = self.callbacks.write().await;
-        for topic in &topics {
-            cbs.insert(topic.clone(), callback_arc.clone());
+        // 1. Wrap the FnMut in a Mutex to "convert" it to an Fn closure
+        let callback_mutable = Mutex::new(callback);
+
+        // 2. Create an Fn closure that locks the mutex and calls the inner FnMut
+        let wrapped_callback = move |msg: WsMessage| {
+            let mut cb = callback_mutable.lock();
+            (&mut *cb)(msg);
+        };
+
+        // 3. Wrap in Arc and cast to your existing Callback type
+        let callback_arc = Arc::new(wrapped_callback) as Callback;
+
+        // --- The rest of the logic remains the same as your original function ---
+
+        // Register callbacks
+        {
+            let mut cbs = self.callbacks.write().await;
+            for topic in &topics {
+                cbs.insert(topic.clone(), callback_arc.clone());
+            }
         }
+
+        // Store subscriptions
+        {
+            let mut subs = self.subscriptions.write().await;
+            subs.extend(topics.clone());
+        }
+
+        // Send subscription request
+        let sub_msg = WsRequest {
+            req_id: uuid::Uuid::new_v4().to_string(),
+            op: "subscribe".to_string(),
+            args: topics,
+        };
+
+        let msg = serde_json::to_string(&sub_msg).map_err(|e| BybitError::Parse(e.to_string()))?;
+
+        self.send(msg).await
     }
-
-    // Store subscriptions
-    {
-        let mut subs = self.subscriptions.write().await;
-        subs.extend(topics.clone());
-    }
-
-    // Send subscription request
-    let sub_msg = WsRequest {
-        req_id: uuid::Uuid::new_v4().to_string(),
-        op: "subscribe".to_string(),
-        args: topics,
-    };
-
-    let msg = serde_json::to_string(&sub_msg).map_err(|e| BybitError::Parse(e.to_string()))? ;
-
-    self.send(msg).await
-}
 
     /// Unsubscribe from topics.
     pub async fn unsubscribe(&mut self, topics: Vec<String>) -> Result<()> {
@@ -379,7 +431,8 @@ where
             args: topics,
         };
 
-        let msg = serde_json::to_string(&unsub_msg).map_err(|e| BybitError::Parse(e.to_string()))?;
+        let msg =
+            serde_json::to_string(&unsub_msg).map_err(|e| BybitError::Parse(e.to_string()))?;
 
         self.send(msg).await
     }
@@ -396,17 +449,16 @@ where
         Ok(())
     }
 
-    
-
     pub async fn send_order(&self, order: WsTradeOrder) -> Result<()> {
         debug!("{:#?}", order);
         if !self.is_trade {
             error!("can t execute a trade on a non trade socket");
-            return Err(BybitError::Parse(("can t execute a trade on a non trade socket".to_string())));
+            return Err(BybitError::Parse(
+                ("can t execute a trade on a non trade socket".to_string()),
+            ));
         }
         let msg = serde_json::to_string(&order).map_err(|e| BybitError::Parse(e.to_string()))?;
         self.send(msg).await
-
     }
 
     /// Check if connected.

@@ -65,3 +65,51 @@ pub fn extract_bybit_info(symbol: &str) -> Option<BybitInfo> {
     })
 }
 
+use reqwest::{Client, Error};
+use serde::{Deserialize, Serialize};
+
+// Definiamo le strutture per mappare il JSON di Bybit
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HttpBybitResponse {
+    #[serde(rename = "retCode")]
+    pub ret_code: i32,
+    #[serde(rename = "retMsg")]
+    pub ret_msg: String,
+    pub result: TickersResult,
+    pub time: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TickersResult {
+    pub category: String,
+    pub list: Vec<OptionTicker>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionTicker {
+    pub symbol: String,
+    pub bid1_price: String,
+    pub ask1_price: String,
+    pub last_price: String,
+    pub mark_price: String,
+    pub open_interest: String,
+    // Aggiungi altri campi se necessario
+}
+
+/// Funzione di libreria che restituisce il JSON già parsato in una Struct
+pub async fn get_option_tickers_json(
+    base_coin: &str
+) -> Result<HttpBybitResponse, Error> {
+    let client = Client::new();
+    let url = "https://api.bybit.com/v5/market/tickers";
+    
+    let response = client
+        .get(url)
+        .query(&[("category", "option"), ("baseCoin", base_coin)])
+        .send()
+        .await?;
+
+    // Deserializza automaticamente il corpo della risposta nel tipo BybitResponse
+    response.json::<HttpBybitResponse>().await
+}
