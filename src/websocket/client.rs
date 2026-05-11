@@ -166,9 +166,9 @@ impl BybitWebSocket {
         while let Some(msg) = read.next().await {
             let Ok(Message::Text(text)) = msg else { continue };
 
-            // let mut bytes = text.into_bytes();
             match serde_json::from_str::<BybitResponse>(&text) {
                 Ok(response) => {
+                    // debug!("{}", text);
                     producer.publish(|e| {
                         *e = response;
                     });
@@ -296,6 +296,7 @@ impl BybitWebSocket {
             .as_ref()
             .ok_or_else(|| BybitError::Auth("API secret not set".into()))?;
 
+        // 10_000 secs are three hours
         let expires = get_timestamp() + 10000;
         let signature = generate_ws_signature(api_secret, expires);
 
