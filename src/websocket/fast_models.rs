@@ -1,5 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::fmt;
+// use serde_with
+
+
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
@@ -7,6 +10,7 @@ pub enum BybitResponse {
     Ticker(TickerSnapshot),
     Command(CommandResponse),
     Execution(ExecutionResponse),
+    Any(String),
     Empty(),
 }
 
@@ -23,18 +27,27 @@ pub struct TickerSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct TickerData {
     pub symbol: String,
-    pub bid_price: String, // Spesso restituito come stringa nelle API crypto per precisione
-    pub bid_size: String,
-    pub bid_iv: String,
-    pub ask_price: String,
-    pub ask_size: String,
-    pub ask_iv: String,
-    pub last_price: String,
+    #[serde(deserialize_with = "parse_float")]
+    pub bid_price: f32, 
+    #[serde(deserialize_with = "parse_float")]
+    pub bid_size: f32,
+    #[serde(deserialize_with = "parse_float")]
+    pub bid_iv: f32,
+    #[serde(deserialize_with = "parse_float")]
+    pub ask_price: f32,
+    #[serde(deserialize_with = "parse_float")]
+    pub ask_size: f32,
+    #[serde(deserialize_with = "parse_float")]
+    pub ask_iv: f32,
+    #[serde(deserialize_with = "parse_float")]
+    pub last_price: f32,
     pub high_price24h: String,
     pub low_price24h: String,
-    pub mark_price: String,
+    #[serde(deserialize_with = "parse_float")]
+    pub mark_price: f32,
     pub index_price: String,
-    pub mark_price_iv: String,
+    #[serde(deserialize_with = "parse_float")]
+    pub mark_price_iv: f32,
     pub underlying_price: String,
     pub open_interest: String,
     pub turnover24h: String,
@@ -78,5 +91,23 @@ impl fmt::Display for TickerData {
             "Symbol: {} | Mark Price: {} | Delta: {}",
             self.symbol, self.mark_price, self.delta
         )
+    }
+}
+
+pub fn parse_float<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Inner enum to accept either a raw number or a string from the input JSON
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrFloat {
+        String(String),
+        Float(f32),
+    }
+
+    match StringOrFloat::deserialize(deserializer)? {
+        StringOrFloat::String(s) => s.parse::<f32>().map_err(serde::de::Error::custom),
+        StringOrFloat::Float(f) => Ok(f),
     }
 }

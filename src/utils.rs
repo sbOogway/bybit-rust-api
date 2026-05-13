@@ -6,6 +6,8 @@ use regex::Regex;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+use crate::websocket::fast_models::parse_float;
+
 #[derive(Debug)]
 pub enum OptionType {
     Put,
@@ -94,6 +96,8 @@ pub struct OptionTicker {
     pub last_price: String,
     pub mark_price: String,
     pub open_interest: String,
+    #[serde(deserialize_with="parse_float")]
+    pub delta: f32,
     // Aggiungi altri campi se necessario
 }
 
