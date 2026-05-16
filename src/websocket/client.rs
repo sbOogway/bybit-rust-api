@@ -166,6 +166,8 @@ impl BybitWebSocket {
                 continue;
             };
 
+            debug!("gate from socket: {}", &text);
+
             match serde_json::from_str::<BybitResponse>(&text) {
                 Ok(response) => {
                     // debug!("{}", text);
@@ -451,7 +453,13 @@ impl BybitWebSocket {
 
     pub fn send_sync(&self, msg: String) {
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(Message::Text(msg));
+            debug!("about to send message into socket: {}", &msg);
+            match tx.try_send(Message::Text(msg)) {
+                Ok(mex) => {
+                    debug!("sent message into socket {}: {:#?}", self.config.url, &mex)
+                }
+                Err(err) => error!("{}", err),
+            }
         }
     }
 

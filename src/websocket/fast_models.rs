@@ -14,7 +14,7 @@ pub enum BybitResponse {
     Empty(),
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct TickerSnapshot {
     pub topic: String,
     pub ts: u64,
@@ -23,7 +23,7 @@ pub struct TickerSnapshot {
     pub data: TickerData,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TickerData {
     pub symbol: String,
